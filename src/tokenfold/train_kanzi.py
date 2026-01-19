@@ -209,6 +209,7 @@ def create_dataloaders(
     batch_size: int = 8,
     max_length: int = 1024,
     max_protein_length: int = 400,
+    min_protein_length: int = 100,
     num_workers: int = 0,  # Use 0 for GPU-based Kanzi encoding
 ):
     """Create train and validation dataloaders."""
@@ -219,6 +220,7 @@ def create_dataloaders(
         kanzi_tokenizer=kanzi_tokenizer,
         max_length=max_length,
         max_protein_length=max_protein_length,
+        min_protein_length=min_protein_length,
         split="train",
     )
 
@@ -228,6 +230,7 @@ def create_dataloaders(
         kanzi_tokenizer=kanzi_tokenizer,
         max_length=max_length,
         max_protein_length=max_protein_length,
+        min_protein_length=min_protein_length,
         split="val",
     )
 
@@ -408,6 +411,7 @@ def get_eval_samples(
     num_samples: int = 50,
     seed: int = 42,
     max_seq_len: int = 200,
+    min_seq_len: int = 100,
 ):
     """Get fixed eval samples for RMSD evaluation."""
     import random
@@ -432,7 +436,7 @@ def get_eval_samples(
             if len(samples) >= num_samples:
                 break
             aa_seq, _, ca_coords = db.get_triplet(idx)
-            if len(aa_seq) <= max_seq_len and len(aa_seq) == len(ca_coords):
+            if min_seq_len <= len(aa_seq) <= max_seq_len and len(aa_seq) == len(ca_coords):
                 samples.append((aa_seq, ca_coords))
 
     return samples
@@ -449,6 +453,7 @@ def train(
     num_epochs: int = 3,
     max_length: int = 1024,
     max_protein_length: int = 400,
+    min_protein_length: int = 100,
     warmup_ratio: float = 0.03,
     use_flash_attn: bool = True,
     log_interval: int = 10,
@@ -514,6 +519,7 @@ def train(
         batch_size=batch_size,
         max_length=max_length,
         max_protein_length=max_protein_length,
+        min_protein_length=min_protein_length,
     )
 
     # Calculate training steps
@@ -552,7 +558,8 @@ def train(
             db_path=db_path,
             kanzi_tokenizer=kanzi_tokenizer,
             num_samples=rmsd_eval_samples,
-            max_seq_len=200,
+            max_seq_len=max_protein_length,
+            min_seq_len=min_protein_length,
         )
         logger.info(f"Loaded {len(eval_samples)} eval samples")
 
@@ -802,6 +809,9 @@ def main():
     parser.add_argument(
         "--max-protein-length", type=int, default=400, help="Max protein length"
     )
+    parser.add_argument(
+        "--min-protein-length", type=int, default=100, help="Min protein length"
+    )
     parser.add_argument("--warmup-ratio", type=float, default=0.03, help="Warmup ratio")
     parser.add_argument("--no-flash-attn", action="store_true", help="Disable Flash Attention")
     parser.add_argument("--log-interval", type=int, default=10, help="Logging interval")
@@ -833,6 +843,7 @@ def main():
         num_epochs=args.num_epochs,
         max_length=args.max_length,
         max_protein_length=args.max_protein_length,
+        min_protein_length=args.min_protein_length,
         warmup_ratio=args.warmup_ratio,
         use_flash_attn=not args.no_flash_attn,
         log_interval=args.log_interval,

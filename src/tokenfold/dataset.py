@@ -275,6 +275,7 @@ class KanziStructureDataset(Dataset):
         val_fraction: float = 0.001,
         seed: int = 42,
         max_protein_length: int = 400,
+        min_protein_length: int = 100,
     ):
         """Initialize Kanzi dataset.
 
@@ -287,6 +288,7 @@ class KanziStructureDataset(Dataset):
             val_fraction: Fraction of data for validation.
             seed: Random seed for train/val split.
             max_protein_length: Maximum protein length to include.
+            min_protein_length: Minimum protein length to include.
         """
         self.db_path = Path(db_path)
         self.tokenizer = tokenizer
@@ -294,6 +296,7 @@ class KanziStructureDataset(Dataset):
         self.max_length = max_length
         self.split = split
         self.max_protein_length = max_protein_length
+        self.min_protein_length = min_protein_length
 
         # Load database with C-alpha coordinates
         self.paired_db = PairedFoldseekDB(db_path, include_ca=True)
@@ -346,7 +349,7 @@ class KanziStructureDataset(Dataset):
             aa_seq, _, ca_coords = self.paired_db.get_triplet(real_idx)
 
             # Skip proteins that are too long or too short
-            if len(aa_seq) > self.max_protein_length or len(aa_seq) < 10:
+            if len(aa_seq) > self.max_protein_length or len(aa_seq) < self.min_protein_length:
                 return self.__getitem__((idx + 1) % len(self))
 
             # Verify C-alpha coordinates match sequence length
@@ -357,7 +360,7 @@ class KanziStructureDataset(Dataset):
                 ca_coords = ca_coords[:min_len]
 
             # Skip if too short after truncation
-            if len(aa_seq) < 10:
+            if len(aa_seq) < self.min_protein_length:
                 return self.__getitem__((idx + 1) % len(self))
 
             # Encode C-alpha coordinates to Kanzi tokens
