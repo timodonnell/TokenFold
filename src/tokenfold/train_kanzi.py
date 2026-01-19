@@ -678,13 +678,13 @@ def train(
                             # Log to wandb as a table
                             example_table = wandb.Table(
                                 columns=["step", "input", "prediction"],
-                                data=[[global_step, input_text[:500], pred_text[:500]]]
+                                data=[[global_step, input_text[:2000], pred_text[:2000]]]
                             )
                             wandb.log({"examples": example_table}, step=global_step)
 
                             # Also log to console (truncated)
-                            logger.info(f"Example input: {input_text[:200]}...")
-                            logger.info(f"Example pred:  {pred_text[:200]}...")
+                            logger.info(f"Example input: {input_text[:2000]}...")
+                            logger.info(f"Example pred:  {pred_text[:2000]}...")
                         except (ValueError, IndexError):
                             pass  # Skip if can't find KANZI token
                     model.train()
