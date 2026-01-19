@@ -636,6 +636,53 @@ def train(
                         )
                     running_loss = 0.0
 
+                # Log example input/output every 100 steps
+                if global_step % 100 == 0 and accelerator.is_main_process:
+                    model.eval()
+                    with torch.no_grad():
+                        # Get first sample from current batch
+                        sample_input = batch["input_ids"][0:1]
+                        sample_mask = batch["attention_mask"][0:1]
+
+                        # Decode input to text
+                        input_text = tokenizer.decode(sample_input[0], skip_special_tokens=False)
+
+                        # Find where to start generation (after <SEP> <KANZI>)
+                        sep_id = tokenizer.convert_tokens_to_ids(SEP_TOKEN)
+                        kanzi_id = tokenizer.convert_tokens_to_ids(KANZI_START)
+
+                        # Find the position after <KANZI> token
+                        input_ids_list = sample_input[0].tolist()
+                        try:
+                            kanzi_pos = input_ids_list.index(kanzi_id) + 1
+                            prompt_ids = sample_input[:, :kanzi_pos]
+                            prompt_mask = sample_mask[:, :kanzi_pos]
+
+                            # Generate from the prompt
+                            unwrapped = accelerator.unwrap_model(model)
+                            generated = unwrapped.generate(
+                                input_ids=prompt_ids,
+                                attention_mask=prompt_mask,
+                                max_new_tokens=200,
+                                do_sample=False,
+                                pad_token_id=tokenizer.pad_token_id,
+                            )
+                            pred_text = tokenizer.decode(generated[0], skip_special_tokens=False)
+
+                            # Log to wandb as a table
+                            example_table = wandb.Table(
+                                columns=["step", "input", "prediction"],
+                                data=[[global_step, input_text[:500], pred_text[:500]]]
+                            )
+                            wandb.log({"examples": example_table}, step=global_step)
+
+                            # Also log to console (truncated)
+                            logger.info(f"Example input: {input_text[:200]}...")
+                            logger.info(f"Example pred:  {pred_text[:200]}...")
+                        except (ValueError, IndexError):
+                            pass  # Skip if can't find KANZI token
+                    model.train()
+
                 # Evaluation
                 if eval_interval > 0 and global_step % eval_interval == 0:
                     model.eval()
