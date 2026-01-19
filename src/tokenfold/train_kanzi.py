@@ -26,6 +26,7 @@ from transformers import (
 
 from .dataset import (
     AA_START,
+    CONTACTS_START,
     KANZI_START,
     KANZI_TOKEN_PREFIX,
     SEP_TOKEN,
@@ -84,11 +85,12 @@ def create_minimal_tokenizer():
     """Create a minimal tokenizer with only amino acids and Kanzi tokens.
 
     Vocabulary:
-    - Special tokens: <PAD>, <EOS>, <BOS>, <UNK>, <AA>, <SEP>, <KANZI>
+    - Special tokens: <PAD>, <EOS>, <BOS>, <UNK>, <AA>, <SEP>, <KANZI>, <CONTACTS>
     - Amino acids: A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y, X
     - Kanzi tokens: <K0>, <K1>, ..., <K999>
+    - Contact tokens: numbers 1-999, hyphen for "i-j" format
 
-    Total: ~1028 tokens
+    Total: ~2030 tokens
     """
     from tokenizers import Tokenizer, models, pre_tokenizers, processors
 
@@ -97,7 +99,7 @@ def create_minimal_tokenizer():
     idx = 0
 
     # Special tokens (must be first for compatibility)
-    special_tokens = ["<PAD>", "<EOS>", "<BOS>", "<UNK>", AA_START, SEP_TOKEN, KANZI_START]
+    special_tokens = ["<PAD>", "<EOS>", "<BOS>", "<UNK>", AA_START, SEP_TOKEN, KANZI_START, CONTACTS_START]
     for token in special_tokens:
         vocab[token] = idx
         idx += 1
@@ -106,6 +108,15 @@ def create_minimal_tokenizer():
     for aa in AMINO_ACIDS + AMINO_ACID_X:
         vocab[aa] = idx
         idx += 1
+
+    # Numbers for contact indices (1-999 covers protein lengths up to 999)
+    for num in range(1, 1000):
+        vocab[str(num)] = idx
+        idx += 1
+
+    # Hyphen for contact format "i-j"
+    vocab["-"] = idx
+    idx += 1
 
     # Kanzi tokens
     for i in range(1000):
@@ -210,6 +221,8 @@ def create_dataloaders(
     max_length: int = 1024,
     max_protein_length: int = 400,
     min_protein_length: int = 100,
+    use_contacts: bool = False,
+    max_contacts: int = 50,
     num_workers: int = 0,  # Use 0 for GPU-based Kanzi encoding
 ):
     """Create train and validation dataloaders."""
@@ -221,6 +234,8 @@ def create_dataloaders(
         max_length=max_length,
         max_protein_length=max_protein_length,
         min_protein_length=min_protein_length,
+        use_contacts=use_contacts,
+        max_contacts=max_contacts,
         split="train",
     )
 
@@ -231,6 +246,8 @@ def create_dataloaders(
         max_length=max_length,
         max_protein_length=max_protein_length,
         min_protein_length=min_protein_length,
+        use_contacts=use_contacts,
+        max_contacts=max_contacts,
         split="val",
     )
 
@@ -463,6 +480,8 @@ def train(
     rmsd_eval_samples: int = 25,
     max_steps: int = -1,
     from_scratch: bool = False,
+    use_contacts: bool = False,
+    max_contacts: int = 50,
 ):
     """Main training function for Kanzi structure prediction.
 
@@ -498,6 +517,8 @@ def train(
                 "learning_rate": learning_rate,
                 "structure_type": "kanzi",
                 "from_scratch": from_scratch,
+                "use_contacts": use_contacts,
+                "max_contacts": max_contacts,
             },
         )
 
@@ -511,7 +532,7 @@ def train(
     )
 
     # Create dataloaders
-    logger.info(f"Loading data from: {db_path}")
+    logger.info(f"Loading data from: {db_path} (use_contacts={use_contacts})")
     train_loader, val_loader = create_dataloaders(
         tokenizer=tokenizer,
         kanzi_tokenizer=kanzi_tokenizer,
@@ -520,6 +541,8 @@ def train(
         max_length=max_length,
         max_protein_length=max_protein_length,
         min_protein_length=min_protein_length,
+        use_contacts=use_contacts,
+        max_contacts=max_contacts,
     )
 
     # Calculate training steps
@@ -830,6 +853,17 @@ def main():
         action="store_true",
         help="Train from scratch with minimal vocabulary (amino acids + Kanzi tokens only)",
     )
+    parser.add_argument(
+        "--use-contacts",
+        action="store_true",
+        help="Include ground truth contacts as input hints",
+    )
+    parser.add_argument(
+        "--max-contacts",
+        type=int,
+        default=50,
+        help="Maximum number of contacts to include as hints",
+    )
 
     args = parser.parse_args()
 
@@ -854,6 +888,8 @@ def main():
         rmsd_eval_samples=args.rmsd_eval_samples,
         max_steps=args.max_steps,
         from_scratch=args.from_scratch,
+        use_contacts=args.use_contacts,
+        max_contacts=args.max_contacts,
     )
 
 

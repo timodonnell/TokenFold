@@ -21,10 +21,44 @@ from .foldseek_db import PairedFoldseekDB
 AA_START = "<AA>"
 SS_START = "<3Di>"
 KANZI_START = "<KANZI>"
+CONTACTS_START = "<CONTACTS>"
 SEP_TOKEN = "<SEP>"
 
 # Kanzi token prefix for vocabulary
 KANZI_TOKEN_PREFIX = "<K"  # Tokens are <K0>, <K1>, ..., <K999>
+
+
+def extract_contacts(
+    ca_coords: np.ndarray,
+    distance_threshold: float = 8.0,
+    min_seq_separation: int = 6,
+    max_contacts: int = 50,
+) -> list[tuple[int, int]]:
+    """Extract non-local contacts from C-alpha coordinates.
+
+    Args:
+        ca_coords: C-alpha coordinates, shape (L, 3) in Angstroms.
+        distance_threshold: Maximum distance for a contact (default 8Å).
+        min_seq_separation: Minimum sequence separation |i-j| for non-local contacts.
+        max_contacts: Maximum number of contacts to return.
+
+    Returns:
+        List of (i, j) tuples representing contacts, sorted by sequence separation.
+    """
+    n = len(ca_coords)
+    contacts = []
+
+    for i in range(n):
+        for j in range(i + min_seq_separation, n):
+            dist = np.linalg.norm(ca_coords[i] - ca_coords[j])
+            if dist < distance_threshold:
+                contacts.append((i, j, j - i))  # (i, j, seq_separation)
+
+    # Sort by sequence separation (longer-range contacts first, more informative)
+    contacts.sort(key=lambda x: -x[2])
+
+    # Return top contacts as (i, j) tuples (1-indexed for natural language)
+    return [(c[0] + 1, c[1] + 1) for c in contacts[:max_contacts]]
 
 
 class StructurePredictionDataset(Dataset):
@@ -276,6 +310,8 @@ class KanziStructureDataset(Dataset):
         seed: int = 42,
         max_protein_length: int = 400,
         min_protein_length: int = 100,
+        use_contacts: bool = False,
+        max_contacts: int = 50,
     ):
         """Initialize Kanzi dataset.
 
@@ -289,6 +325,8 @@ class KanziStructureDataset(Dataset):
             seed: Random seed for train/val split.
             max_protein_length: Maximum protein length to include.
             min_protein_length: Minimum protein length to include.
+            use_contacts: Whether to include contact hints in the input.
+            max_contacts: Maximum number of contacts to include.
         """
         self.db_path = Path(db_path)
         self.tokenizer = tokenizer
@@ -297,6 +335,8 @@ class KanziStructureDataset(Dataset):
         self.split = split
         self.max_protein_length = max_protein_length
         self.min_protein_length = min_protein_length
+        self.use_contacts = use_contacts
+        self.max_contacts = max_contacts
 
         # Load database with C-alpha coordinates
         self.paired_db = PairedFoldseekDB(db_path, include_ca=True)
@@ -325,21 +365,34 @@ class KanziStructureDataset(Dataset):
         except Exception:
             pass
 
-    def format_example(self, aa_seq: str, kanzi_tokens: list[int]) -> str:
+    def format_example(
+        self,
+        aa_seq: str,
+        kanzi_tokens: list[int],
+        contacts: list[tuple[int, int]] | None = None,
+    ) -> str:
         """Format a sequence with Kanzi tokens for training.
 
         Args:
             aa_seq: Amino acid sequence.
             kanzi_tokens: List of Kanzi token indices (0-999).
+            contacts: Optional list of (i, j) contact pairs (1-indexed).
 
         Returns:
             Formatted string like "<AA> M K T ... <SEP> <KANZI> <K599> <K358> ... </s>"
+            Or with contacts: "<AA> M K T ... <CONTACTS> 5-20 7-35 ... <SEP> <KANZI> ..."
         """
         aa_spaced = " ".join(aa_seq)
         # Convert Kanzi token indices to special tokens
         kanzi_str = " ".join(f"{KANZI_TOKEN_PREFIX}{t}>" for t in kanzi_tokens)
         eos = self.tokenizer.eos_token or ""
-        return f"{AA_START} {aa_spaced} {SEP_TOKEN} {KANZI_START} {kanzi_str} {eos}"
+
+        if contacts:
+            # Format contacts as "i-j" pairs (uses standard number tokens)
+            contacts_str = " ".join(f"{i}-{j}" for i, j in contacts)
+            return f"{AA_START} {aa_spaced} {CONTACTS_START} {contacts_str} {SEP_TOKEN} {KANZI_START} {kanzi_str} {eos}"
+        else:
+            return f"{AA_START} {aa_spaced} {SEP_TOKEN} {KANZI_START} {kanzi_str} {eos}"
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         real_idx = self.indices[idx]
@@ -377,8 +430,13 @@ class KanziStructureDataset(Dataset):
             # Skip problematic entries
             return self.__getitem__((idx + 1) % len(self))
 
+        # Extract contacts if enabled
+        contacts = None
+        if self.use_contacts:
+            contacts = extract_contacts(ca_coords, max_contacts=self.max_contacts)
+
         # Format the text
-        text = self.format_example(aa_seq, kanzi_tokens)
+        text = self.format_example(aa_seq, kanzi_tokens, contacts=contacts)
 
         # Tokenize
         encoded = self.tokenizer(
