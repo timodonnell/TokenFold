@@ -676,7 +676,7 @@ def train(
                             # Create wandb table with examples
                             columns = [
                                 "type", "rmsd", "token_acc", "length",
-                                "pred_tokens", "gt_tokens",
+                                "sequence", "pred_tokens", "gt_tokens",
                                 "pred_structure", "gt_structure"
                             ]
                             data = []
@@ -722,6 +722,7 @@ def train(
                                     f"{ex['rmsd']:.2f}",
                                     f"{ex['token_accuracy']:.3f}",
                                     len(ex["aa_seq"]),
+                                    ex["aa_seq"],
                                     pred_tok_str,
                                     gt_tok_str,
                                     wandb.Molecule(pred_pdb_path),
