@@ -498,9 +498,7 @@ def train(
         )
 
     # Initialize accelerator
-    accelerator = Accelerator(
-        log_with="wandb",
-    )
+    accelerator = Accelerator()
 
     if accelerator.is_main_process:
         os.makedirs(output_dir, exist_ok=True)
@@ -508,9 +506,9 @@ def train(
         logger.info(f"Using {accelerator.num_processes} GPUs")
 
     # Initialize Wandb tracking
-    if wandb_enabled:
-        accelerator.init_trackers(
-            project_name=os.environ.get("WANDB_PROJECT", "structure-prediction"),
+    if wandb_enabled and accelerator.is_main_process:
+        wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "structure-prediction"),
             config={
                 "model_name": model_name,
                 "batch_size": batch_size,
@@ -519,6 +517,8 @@ def train(
                 "from_scratch": from_scratch,
                 "use_contacts": use_contacts,
                 "max_contacts": max_contacts,
+                "max_protein_length": max_protein_length,
+                "min_protein_length": min_protein_length,
             },
         )
 
@@ -630,10 +630,10 @@ def train(
                             f"Step {global_step}/{num_training_steps} | "
                             f"Loss: {avg_loss:.4f} | LR: {lr:.2e}"
                         )
-                    accelerator.log(
-                        {"train_loss": float(avg_loss), "learning_rate": float(lr)},
-                        step=global_step,
-                    )
+                        wandb.log(
+                            {"train_loss": float(avg_loss), "learning_rate": float(lr)},
+                            step=global_step,
+                        )
                     running_loss = 0.0
 
                 # Evaluation
@@ -666,7 +666,7 @@ def train(
 
                     if accelerator.is_main_process:
                         logger.info(f"Step {global_step} | Eval Loss: {avg_eval_loss:.4f}")
-                    accelerator.log({"eval_loss": float(avg_eval_loss)}, step=global_step)
+                        wandb.log({"eval_loss": float(avg_eval_loss)}, step=global_step)
                     model.train()
 
                 # RMSD evaluation (independent from standard eval)
@@ -690,7 +690,7 @@ def train(
                         f"Step {global_step} | RMSD: {rmsd_metrics['rmsd_mean']:.2f} Å, "
                         f"Token Acc: {rmsd_metrics['token_accuracy']:.4f}"
                     )
-                    accelerator.log(rmsd_metrics, step=global_step)
+                    wandb.log(rmsd_metrics, step=global_step)
 
                     # Log example structures to wandb
                     if examples:
@@ -792,8 +792,8 @@ def train(
         unwrapped_model.save_pretrained(final_path / "model")
         tokenizer.save_pretrained(final_path / "tokenizer")
         logger.info(f"Saved final model to {final_path}")
+        wandb.finish()
 
-    accelerator.end_training()
     return model, tokenizer
 
 
