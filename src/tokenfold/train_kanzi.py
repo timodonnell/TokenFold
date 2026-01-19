@@ -223,6 +223,7 @@ def create_dataloaders(
     min_protein_length: int = 100,
     use_contacts: bool = False,
     max_contacts: int = 50,
+    contact_prob: float = 1.0,
     num_workers: int = 0,  # Use 0 for GPU-based Kanzi encoding
 ):
     """Create train and validation dataloaders."""
@@ -236,6 +237,7 @@ def create_dataloaders(
         min_protein_length=min_protein_length,
         use_contacts=use_contacts,
         max_contacts=max_contacts,
+        contact_prob=contact_prob,
         split="train",
     )
 
@@ -248,6 +250,7 @@ def create_dataloaders(
         min_protein_length=min_protein_length,
         use_contacts=use_contacts,
         max_contacts=max_contacts,
+        contact_prob=1.0,  # Always use all contacts for validation
         split="val",
     )
 
@@ -482,6 +485,7 @@ def train(
     from_scratch: bool = False,
     use_contacts: bool = False,
     max_contacts: int = 50,
+    contact_prob: float = 1.0,
 ):
     """Main training function for Kanzi structure prediction.
 
@@ -517,6 +521,7 @@ def train(
                 "from_scratch": from_scratch,
                 "use_contacts": use_contacts,
                 "max_contacts": max_contacts,
+                "contact_prob": contact_prob,
                 "max_protein_length": max_protein_length,
                 "min_protein_length": min_protein_length,
             },
@@ -543,6 +548,7 @@ def train(
         min_protein_length=min_protein_length,
         use_contacts=use_contacts,
         max_contacts=max_contacts,
+        contact_prob=contact_prob,
     )
 
     # Calculate training steps
@@ -911,6 +917,12 @@ def main():
         default=50,
         help="Maximum number of contacts to include as hints",
     )
+    parser.add_argument(
+        "--contact-prob",
+        type=float,
+        default=1.0,
+        help="Probability of including each contact (0-1, for dropout)",
+    )
 
     args = parser.parse_args()
 
@@ -937,6 +949,7 @@ def main():
         from_scratch=args.from_scratch,
         use_contacts=args.use_contacts,
         max_contacts=args.max_contacts,
+        contact_prob=args.contact_prob,
     )
 
 

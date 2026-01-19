@@ -312,6 +312,7 @@ class KanziStructureDataset(Dataset):
         min_protein_length: int = 100,
         use_contacts: bool = False,
         max_contacts: int = 50,
+        contact_prob: float = 1.0,
     ):
         """Initialize Kanzi dataset.
 
@@ -327,6 +328,7 @@ class KanziStructureDataset(Dataset):
             min_protein_length: Minimum protein length to include.
             use_contacts: Whether to include contact hints in the input.
             max_contacts: Maximum number of contacts to include.
+            contact_prob: Probability of including each contact (0-1).
         """
         self.db_path = Path(db_path)
         self.tokenizer = tokenizer
@@ -337,6 +339,7 @@ class KanziStructureDataset(Dataset):
         self.min_protein_length = min_protein_length
         self.use_contacts = use_contacts
         self.max_contacts = max_contacts
+        self.contact_prob = contact_prob
 
         # Load database with C-alpha coordinates
         self.paired_db = PairedFoldseekDB(db_path, include_ca=True)
@@ -434,6 +437,9 @@ class KanziStructureDataset(Dataset):
         contacts = None
         if self.use_contacts:
             contacts = extract_contacts(ca_coords, max_contacts=self.max_contacts)
+            # Randomly drop contacts based on contact_prob
+            if self.contact_prob < 1.0 and contacts:
+                contacts = [c for c in contacts if random.random() < self.contact_prob]
 
         # Format the text
         text = self.format_example(aa_seq, kanzi_tokens, contacts=contacts)
