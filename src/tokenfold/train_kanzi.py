@@ -9,6 +9,7 @@ Kanzi tokens can be decoded to 3D C-alpha coordinates for RMSD validation.
 import argparse
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -29,7 +30,8 @@ from .dataset import (
     CONTACTS_START,
     KANZI_START,
     KANZI_TOKEN_PREFIX,
-    SEP_TOKEN,
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_NO_CONTACTS,
     KanziStructureDataset,
     add_kanzi_tokens,
 )
@@ -85,7 +87,8 @@ def create_minimal_tokenizer():
     """Create a minimal tokenizer with only amino acids and Kanzi tokens.
 
     Vocabulary:
-    - Special tokens: <PAD>, <EOS>, <BOS>, <UNK>, <AA>, <SEP>, <KANZI>, <CONTACTS>
+    - Special tokens: <PAD>, <EOS>, <BOS>, <UNK>
+    - Natural language delimiters: "Protein", "sequence:", "Structure:", "Contacts:"
     - Amino acids: A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y, X
     - Kanzi tokens: <K0>, <K1>, ..., <K999>
     - Contact tokens: numbers 1-999, hyphen for "i-j" format
@@ -99,8 +102,17 @@ def create_minimal_tokenizer():
     idx = 0
 
     # Special tokens (must be first for compatibility)
-    special_tokens = ["<PAD>", "<EOS>", "<BOS>", "<UNK>", AA_START, SEP_TOKEN, KANZI_START, CONTACTS_START]
+    special_tokens = ["<PAD>", "<EOS>", "<BOS>", "<UNK>"]
     for token in special_tokens:
+        vocab[token] = idx
+        idx += 1
+
+    # Natural language delimiters (split by whitespace since tokenizer uses whitespace)
+    # "Protein sequence:" -> "Protein", "sequence:"
+    # "Structure:" -> "Structure:"
+    # "Contacts:" -> "Contacts:"
+    delimiter_tokens = ["Protein", "sequence:", "Structure:", "Contacts:"]
+    for token in delimiter_tokens:
         vocab[token] = idx
         idx += 1
 
@@ -224,6 +236,7 @@ def create_dataloaders(
     use_contacts: bool = False,
     max_contacts: int = 50,
     contact_prob: float = 1.0,
+    use_system_prompt: bool = True,
     num_workers: int = 0,  # Use 0 for GPU-based Kanzi encoding
 ):
     """Create train and validation dataloaders."""
@@ -238,6 +251,7 @@ def create_dataloaders(
         use_contacts=use_contacts,
         max_contacts=max_contacts,
         contact_prob=contact_prob,
+        use_system_prompt=use_system_prompt,
         split="train",
     )
 
@@ -251,6 +265,7 @@ def create_dataloaders(
         use_contacts=use_contacts,
         max_contacts=max_contacts,
         contact_prob=1.0,  # Always use all contacts for validation
+        use_system_prompt=use_system_prompt,
         split="val",
     )
 
@@ -280,6 +295,7 @@ def run_rmsd_eval(
     eval_samples: list[tuple[str, np.ndarray]],
     device,
     max_new_tokens: int = 512,
+    use_system_prompt: bool = True,
 ) -> tuple[dict, list[dict]]:
     """Run RMSD-based evaluation on generated structures.
 
@@ -305,9 +321,10 @@ def run_rmsd_eval(
     valid_predictions = 0
 
     for aa_seq, gt_coords in eval_samples:
-        # Format input prompt
+        # Format input prompt (with optional system prompt)
         aa_spaced = " ".join(aa_seq)
-        prompt = f"{AA_START} {aa_spaced} {SEP_TOKEN} {KANZI_START}"
+        prefix = SYSTEM_PROMPT_NO_CONTACTS if use_system_prompt else ""
+        prompt = f"{prefix}{AA_START} {aa_spaced} {KANZI_START}"
 
         inputs = tokenizer(
             prompt,
@@ -399,6 +416,41 @@ def run_rmsd_eval(
     rmsd_lt_2 = sum(r < 2.0 for r in rmsds) / n if n > 0 else 0.0
     rmsd_lt_4 = sum(r < 4.0 for r in rmsds) / n if n > 0 else 0.0
 
+    # Compute token diversity metrics across all predictions
+    all_pred_tokens = []
+    per_sample_unique_ratios = []
+    for r in results:
+        tokens = r["pred_tokens"]
+        all_pred_tokens.extend(tokens)
+        if len(tokens) > 0:
+            unique_ratio = len(set(tokens)) / len(tokens)
+            per_sample_unique_ratios.append(unique_ratio)
+
+    # Global diversity: unique tokens across all samples
+    unique_tokens_global = len(set(all_pred_tokens)) if all_pred_tokens else 0
+    total_tokens = len(all_pred_tokens)
+
+    # Per-sample diversity: average ratio of unique tokens per sequence
+    avg_unique_ratio = np.mean(per_sample_unique_ratios) if per_sample_unique_ratios else 0.0
+
+    # Token entropy (higher = more diverse)
+    if all_pred_tokens:
+        from collections import Counter
+        token_counts = Counter(all_pred_tokens)
+        probs = np.array(list(token_counts.values())) / total_tokens
+        token_entropy = -np.sum(probs * np.log2(probs + 1e-10))
+        # Max entropy for reference (if all 1000 tokens equally likely)
+        max_entropy = np.log2(1000)
+        normalized_entropy = token_entropy / max_entropy
+        # Most common token
+        most_common_token, most_common_count = token_counts.most_common(1)[0]
+        most_common_freq = most_common_count / total_tokens
+    else:
+        token_entropy = 0.0
+        normalized_entropy = 0.0
+        most_common_token = -1
+        most_common_freq = 0.0
+
     metrics = {
         "rmsd_mean": np.mean(rmsds) if rmsds else float("nan"),
         "rmsd_median": np.median(rmsds) if rmsds else float("nan"),
@@ -408,6 +460,13 @@ def run_rmsd_eval(
         "token_accuracy": np.mean(token_accuracies) if token_accuracies else 0.0,
         "valid_predictions": valid_predictions / n if n > 0 else 0.0,
         "num_samples": n,
+        # Diversity metrics
+        "token_diversity/unique_tokens": unique_tokens_global,
+        "token_diversity/unique_ratio_per_seq": avg_unique_ratio,
+        "token_diversity/entropy": token_entropy,
+        "token_diversity/normalized_entropy": normalized_entropy,
+        "token_diversity/most_common_token": most_common_token,
+        "token_diversity/most_common_freq": most_common_freq,
     }
 
     # Select best, median, worst examples
@@ -486,12 +545,17 @@ def train(
     use_contacts: bool = False,
     max_contacts: int = 50,
     contact_prob: float = 1.0,
+    freeze_base_steps: int = 0,
+    resume_from: str | None = None,
 ):
     """Main training function for Kanzi structure prediction.
 
     Args:
         from_scratch: If True, train with minimal vocabulary (amino acids + Kanzi tokens only)
                      and random weight initialization.
+        freeze_base_steps: Number of steps to freeze base model and only train embeddings.
+                          Helps new Kanzi token embeddings learn before full fine-tuning.
+        resume_from: Path to checkpoint directory to resume training from.
     """
 
     # Check if wandb is available (env var or logged in)
@@ -511,19 +575,35 @@ def train(
 
     # Initialize Wandb tracking
     if wandb_enabled and accelerator.is_main_process:
+        # Get git commit SHA
+        import subprocess
+        try:
+            git_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+            ).decode("utf-8").strip()
+        except Exception:
+            git_sha = "unknown"
+
         wandb.init(
             project=os.environ.get("WANDB_PROJECT", "structure-prediction"),
             config={
                 "model_name": model_name,
                 "batch_size": batch_size,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
                 "learning_rate": learning_rate,
+                "num_epochs": num_epochs,
+                "max_length": max_length,
+                "max_protein_length": max_protein_length,
+                "min_protein_length": min_protein_length,
+                "warmup_ratio": warmup_ratio,
                 "structure_type": "kanzi",
                 "from_scratch": from_scratch,
                 "use_contacts": use_contacts,
                 "max_contacts": max_contacts,
                 "contact_prob": contact_prob,
-                "max_protein_length": max_protein_length,
-                "min_protein_length": min_protein_length,
+                "freeze_base_steps": freeze_base_steps,
+                "git_sha": git_sha,
+                "command": " ".join(sys.argv),
             },
         )
 
@@ -537,7 +617,9 @@ def train(
     )
 
     # Create dataloaders
-    logger.info(f"Loading data from: {db_path} (use_contacts={use_contacts})")
+    # Disable system prompt for from_scratch mode (model won't understand natural language)
+    use_system_prompt = not from_scratch
+    logger.info(f"Loading data from: {db_path} (use_contacts={use_contacts}, use_system_prompt={use_system_prompt})")
     train_loader, val_loader = create_dataloaders(
         tokenizer=tokenizer,
         kanzi_tokenizer=kanzi_tokenizer,
@@ -549,6 +631,7 @@ def train(
         use_contacts=use_contacts,
         max_contacts=max_contacts,
         contact_prob=contact_prob,
+        use_system_prompt=use_system_prompt,
     )
 
     # Calculate training steps
@@ -574,10 +657,64 @@ def train(
         num_training_steps=num_training_steps,
     )
 
-    # Prepare with accelerator
-    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, val_loader, scheduler
+    # Prepare with accelerator (scheduler managed separately for resume support)
+    model, optimizer, train_loader, val_loader = accelerator.prepare(
+        model, optimizer, train_loader, val_loader
     )
+
+    # Resume from checkpoint if specified
+    starting_step = 0
+    if resume_from:
+        logger.info(f"Resuming from checkpoint: {resume_from}")
+        # Extract step number from checkpoint path (e.g., checkpoint-1000 -> 1000)
+        try:
+            starting_step = int(Path(resume_from).name.split("-")[-1])
+            logger.info(f"Resuming from step {starting_step}")
+        except ValueError:
+            logger.warning("Could not parse step from checkpoint path, starting from 0")
+
+        # Load only model weights (not optimizer/scheduler to allow LR changes)
+        import safetensors.torch
+        model_path = Path(resume_from) / "model.safetensors"
+        if model_path.exists():
+            state_dict = safetensors.torch.load_file(str(model_path))
+            unwrapped_model = accelerator.unwrap_model(model)
+            # Use strict=False to handle tied weights (lm_head shares embed_tokens)
+            missing, unexpected = unwrapped_model.load_state_dict(state_dict, strict=False)
+            if missing:
+                # Filter out expected missing keys (tied weights)
+                truly_missing = [k for k in missing if "lm_head" not in k]
+                if truly_missing:
+                    logger.warning(f"Missing keys in checkpoint: {truly_missing}")
+            logger.info(f"Loaded model weights from {model_path}")
+        else:
+            logger.warning(f"Model file not found at {model_path}, using accelerator.load_state()")
+            accelerator.load_state(resume_from)
+
+        # Create fresh scheduler for remaining steps with specified LR
+        remaining_steps = num_training_steps - starting_step
+        remaining_warmup = max(0, num_warmup_steps - starting_step)
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=remaining_warmup,
+            num_training_steps=remaining_steps,
+        )
+        logger.info(f"Created new scheduler: LR={learning_rate}, remaining_steps={remaining_steps}, warmup={remaining_warmup}")
+
+    # Freeze base model if doing embedding warmup
+    base_frozen = False
+    if freeze_base_steps > 0 and not from_scratch:
+        logger.info(f"Freezing base model for first {freeze_base_steps} steps (embedding warmup)")
+        unwrapped = accelerator.unwrap_model(model)
+        # Freeze everything except embeddings
+        for name, param in unwrapped.named_parameters():
+            if "embed" not in name.lower():
+                param.requires_grad = False
+        base_frozen = True
+        # Log trainable params
+        trainable = sum(p.numel() for p in unwrapped.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in unwrapped.parameters())
+        logger.info(f"Trainable parameters: {trainable:,} / {total:,} ({trainable/total:.1%})")
 
     # Get fixed eval samples for RMSD evaluation
     eval_samples = None
@@ -594,13 +731,14 @@ def train(
 
     # Training loop
     model.train()
-    global_step = 0
+    global_step = starting_step
     running_loss = 0.0
 
     progress_bar = tqdm(
         range(num_training_steps),
         desc="Training",
         disable=not accelerator.is_main_process,
+        initial=starting_step,
     )
 
     for epoch in range(num_epochs):
@@ -627,6 +765,16 @@ def train(
                 global_step += 1
                 progress_bar.update(1)
 
+                # Unfreeze base model after warmup period
+                if base_frozen and global_step >= freeze_base_steps:
+                    logger.info(f"Step {global_step}: Unfreezing base model (embedding warmup complete)")
+                    unwrapped = accelerator.unwrap_model(model)
+                    for param in unwrapped.parameters():
+                        param.requires_grad = True
+                    base_frozen = False
+                    trainable = sum(p.numel() for p in unwrapped.parameters() if p.requires_grad)
+                    logger.info(f"Trainable parameters: {trainable:,}")
+
                 # Logging
                 if global_step % log_interval == 0:
                     avg_loss = running_loss / log_interval
@@ -650,43 +798,53 @@ def train(
                         sample_input = batch["input_ids"][0:1]
                         sample_mask = batch["attention_mask"][0:1]
 
-                        # Decode input to text
-                        input_text = tokenizer.decode(sample_input[0], skip_special_tokens=False)
+                        # Find the first Kanzi token (<K0> through <K999>) to determine prompt end
+                        kanzi_token_ids = set(
+                            tokenizer.convert_tokens_to_ids(f"{KANZI_TOKEN_PREFIX}{i}>")
+                            for i in range(1000)
+                        )
+                        kanzi_token_ids.discard(None)
+                        kanzi_token_ids.discard(tokenizer.unk_token_id)
 
-                        # Find where to start generation (after <SEP> <KANZI>)
-                        sep_id = tokenizer.convert_tokens_to_ids(SEP_TOKEN)
-                        kanzi_id = tokenizer.convert_tokens_to_ids(KANZI_START)
-
-                        # Find the position after <KANZI> token
                         input_ids_list = sample_input[0].tolist()
+                        kanzi_pos = None
+                        for pos, tid in enumerate(input_ids_list):
+                            if tid in kanzi_token_ids:
+                                kanzi_pos = pos
+                                break
+
                         try:
-                            kanzi_pos = input_ids_list.index(kanzi_id) + 1
-                            prompt_ids = sample_input[:, :kanzi_pos]
-                            prompt_mask = sample_mask[:, :kanzi_pos]
+                            if kanzi_pos is not None:
+                                # Prompt includes everything up to (not including) first Kanzi token
+                                prompt_ids = sample_input[:, :kanzi_pos]
+                                prompt_mask = sample_mask[:, :kanzi_pos]
 
-                            # Generate from the prompt
-                            unwrapped = accelerator.unwrap_model(model)
-                            generated = unwrapped.generate(
-                                input_ids=prompt_ids,
-                                attention_mask=prompt_mask,
-                                max_new_tokens=200,
-                                do_sample=False,
-                                pad_token_id=tokenizer.pad_token_id,
-                            )
-                            pred_text = tokenizer.decode(generated[0], skip_special_tokens=False)
+                                # Decode just the prompt (not the full training example)
+                                prompt_text = tokenizer.decode(prompt_ids[0], skip_special_tokens=False)
 
-                            # Log to wandb as a table
-                            example_table = wandb.Table(
-                                columns=["step", "input", "prediction"],
-                                data=[[global_step, input_text[:2000], pred_text[:2000]]]
-                            )
-                            wandb.log({"examples": example_table}, step=global_step)
+                                # Generate from the prompt
+                                unwrapped = accelerator.unwrap_model(model)
+                                generated = unwrapped.generate(
+                                    input_ids=prompt_ids,
+                                    attention_mask=prompt_mask,
+                                    max_new_tokens=200,
+                                    do_sample=False,
+                                    pad_token_id=tokenizer.pad_token_id,
+                                )
+                                pred_text = tokenizer.decode(generated[0], skip_special_tokens=False)
 
-                            # Also log to console (truncated)
-                            logger.info(f"Example input: {input_text[:2000]}...")
-                            logger.info(f"Example pred:  {pred_text[:2000]}...")
-                        except (ValueError, IndexError):
-                            pass  # Skip if can't find KANZI token
+                                # Log to wandb as a table
+                                example_table = wandb.Table(
+                                    columns=["step", "prompt", "prediction"],
+                                    data=[[global_step, prompt_text[:2000], pred_text[:2000]]]
+                                )
+                                wandb.log({"examples": example_table}, step=global_step)
+
+                                # Also log to console (truncated)
+                                logger.info(f"Example prompt: {prompt_text[:2000]}...")
+                                logger.info(f"Example pred:   {pred_text[:2000]}...")
+                        except Exception:
+                            pass  # Skip if generation fails
                     model.train()
 
                 # Evaluation
@@ -738,10 +896,13 @@ def train(
                         kanzi_tokenizer=kanzi_tokenizer,
                         eval_samples=eval_samples,
                         device=accelerator.device,
+                        use_system_prompt=use_system_prompt,
                     )
                     logger.info(
                         f"Step {global_step} | RMSD: {rmsd_metrics['rmsd_mean']:.2f} Å, "
-                        f"Token Acc: {rmsd_metrics['token_accuracy']:.4f}"
+                        f"Token Acc: {rmsd_metrics['token_accuracy']:.4f}, "
+                        f"Unique tokens: {rmsd_metrics['token_diversity/unique_tokens']}, "
+                        f"Most common: <K{rmsd_metrics['token_diversity/most_common_token']}> ({rmsd_metrics['token_diversity/most_common_freq']:.1%})"
                     )
                     wandb.log(rmsd_metrics, step=global_step)
 
@@ -923,6 +1084,18 @@ def main():
         default=1.0,
         help="Probability of including each contact (0-1, for dropout)",
     )
+    parser.add_argument(
+        "--freeze-base-steps",
+        type=int,
+        default=0,
+        help="Steps to freeze base model and only train embeddings (embedding warmup)",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Path to checkpoint directory to resume training from",
+    )
 
     args = parser.parse_args()
 
@@ -950,6 +1123,8 @@ def main():
         use_contacts=args.use_contacts,
         max_contacts=args.max_contacts,
         contact_prob=args.contact_prob,
+        freeze_base_steps=args.freeze_base_steps,
+        resume_from=args.resume_from,
     )
 
 

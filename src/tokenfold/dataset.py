@@ -1,9 +1,10 @@
 """
 Dataset for sequence-to-structure prediction training.
 
-Formats protein data for causal language modeling:
-- 3Di format: <AA>SEQUENCE<SEP><3Di>STRUCTURE
-- Kanzi format: <AA>SEQUENCE<SEP><KANZI>TOKEN_IDS
+Formats protein data for causal language modeling using natural language delimiters:
+- 3Di format: Protein sequence: M K T ... Structure 3Di: D S A ...
+- Kanzi format: Protein sequence: M K T ... Structure: <K599> <K358> ...
+- With contacts: Protein sequence: M K T ... Contacts: 5-20 7-35 ... Structure: <K599> ...
 """
 
 import random
@@ -17,15 +18,30 @@ from torch.utils.data import Dataset, IterableDataset
 from .foldseek_db import PairedFoldseekDB
 
 
-# Special tokens for sequence-to-structure format
-AA_START = "<AA>"
-SS_START = "<3Di>"
-KANZI_START = "<KANZI>"
-CONTACTS_START = "<CONTACTS>"
-SEP_TOKEN = "<SEP>"
+# Natural language delimiters (leverage pretrained embeddings)
+AA_START = "Protein sequence:"
+SS_START = "Structure 3Di:"
+KANZI_START = "Structure:"
+CONTACTS_START = "Contacts:"
+SEP_TOKEN = ""  # No longer needed with natural language format
 
-# Kanzi token prefix for vocabulary
+# Kanzi token prefix for vocabulary (these are truly new tokens)
 KANZI_TOKEN_PREFIX = "<K"  # Tokens are <K0>, <K1>, ..., <K999>
+
+# System prompt to leverage pretrained knowledge (document-style, not instruction-style)
+# Explains the data format to help the model understand the task
+SYSTEM_PROMPT = """Protein Structure Prediction
+
+This document contains a protein's amino acid sequence and its corresponding 3D backbone structure. The structure is encoded as Kanzi tokens, where each token represents the local 3D geometry (position and orientation) of one residue. Contacts are pairs of residue positions (i-j) whose C-alpha atoms are within 8 Angstroms in the folded structure, excluding nearby residues in sequence.
+
+"""
+
+# Shorter version without contacts explanation
+SYSTEM_PROMPT_NO_CONTACTS = """Protein Structure Prediction
+
+This document contains a protein's amino acid sequence and its corresponding 3D backbone structure. The structure is encoded as Kanzi tokens, where each token represents the local 3D geometry (position and orientation) of one residue.
+
+"""
 
 
 def extract_contacts(
@@ -123,7 +139,7 @@ class StructurePredictionDataset(Dataset):
         """
         aa_spaced = " ".join(aa_seq)
         ss_spaced = " ".join(ss_seq)
-        return f"{AA_START} {aa_spaced} {SEP_TOKEN} {SS_START} {ss_spaced} {self.eos_token}"
+        return f"{AA_START} {aa_spaced} {SS_START} {ss_spaced} {self.eos_token}"
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         real_idx = self.indices[idx]
@@ -144,25 +160,17 @@ class StructurePredictionDataset(Dataset):
         input_ids = encoded["input_ids"].squeeze(0)
         attention_mask = encoded["attention_mask"].squeeze(0)
 
-        # Create labels: mask loss on input sequence (before <SEP>)
+        # Create labels: mask loss on input sequence (before structure tokens)
         labels = input_ids.clone()
 
-        # Find <SEP> token position to mask input
-        sep_token_id = self.tokenizer.convert_tokens_to_ids(SEP_TOKEN)
-        if sep_token_id is not None and sep_token_id != self.tokenizer.unk_token_id:
-            sep_positions = (input_ids == sep_token_id).nonzero(as_tuple=True)[0]
-            if len(sep_positions) > 0:
-                # Mask everything before and including <SEP>
-                sep_pos = sep_positions[0].item()
-                labels[:sep_pos + 1] = -100
-        else:
-            # Fallback: find position of <3Di> token pattern
-            ss_start_id = self.tokenizer.convert_tokens_to_ids(SS_START)
-            if ss_start_id is not None and ss_start_id != self.tokenizer.unk_token_id:
-                ss_positions = (input_ids == ss_start_id).nonzero(as_tuple=True)[0]
-                if len(ss_positions) > 0:
-                    ss_pos = ss_positions[0].item()
-                    labels[:ss_pos] = -100
+        # Find the SS_START token position to determine where structure begins
+        # Note: SS_START may be tokenized into multiple tokens by pretrained tokenizers
+        ss_start_id = self.tokenizer.convert_tokens_to_ids(SS_START)
+        if ss_start_id is not None and ss_start_id != self.tokenizer.unk_token_id:
+            ss_positions = (input_ids == ss_start_id).nonzero(as_tuple=True)[0]
+            if len(ss_positions) > 0:
+                ss_pos = ss_positions[0].item()
+                labels[:ss_pos] = -100
 
         # Mask padding
         labels[attention_mask == 0] = -100
@@ -214,7 +222,7 @@ class StreamingStructureDataset(IterableDataset):
         """
         aa_spaced = " ".join(aa_seq)
         ss_spaced = " ".join(ss_seq)
-        return f"{AA_START} {aa_spaced} {SEP_TOKEN} {SS_START} {ss_spaced} {self.eos_token}"
+        return f"{AA_START} {aa_spaced} {SS_START} {ss_spaced} {self.eos_token}"
 
     def process_example(self, aa_seq: str, ss_seq: str) -> dict[str, torch.Tensor] | None:
         """Process a single example."""
@@ -239,12 +247,12 @@ class StreamingStructureDataset(IterableDataset):
         labels = input_ids.clone()
 
         # Mask input sequence (before structure)
-        sep_token_id = self.tokenizer.convert_tokens_to_ids(SEP_TOKEN)
-        if sep_token_id is not None and sep_token_id != self.tokenizer.unk_token_id:
-            sep_positions = (input_ids == sep_token_id).nonzero(as_tuple=True)[0]
-            if len(sep_positions) > 0:
-                sep_pos = sep_positions[0].item()
-                labels[:sep_pos + 1] = -100
+        ss_start_id = self.tokenizer.convert_tokens_to_ids(SS_START)
+        if ss_start_id is not None and ss_start_id != self.tokenizer.unk_token_id:
+            ss_positions = (input_ids == ss_start_id).nonzero(as_tuple=True)[0]
+            if len(ss_positions) > 0:
+                ss_pos = ss_positions[0].item()
+                labels[:ss_pos] = -100
 
         labels[attention_mask == 0] = -100
 
@@ -313,6 +321,7 @@ class KanziStructureDataset(Dataset):
         use_contacts: bool = False,
         max_contacts: int = 50,
         contact_prob: float = 1.0,
+        use_system_prompt: bool = True,
     ):
         """Initialize Kanzi dataset.
 
@@ -329,6 +338,8 @@ class KanziStructureDataset(Dataset):
             use_contacts: Whether to include contact hints in the input.
             max_contacts: Maximum number of contacts to include.
             contact_prob: Probability of including each contact (0-1).
+            use_system_prompt: Whether to include natural language system prompt.
+                              Disable for from_scratch mode where it won't help.
         """
         self.db_path = Path(db_path)
         self.tokenizer = tokenizer
@@ -340,6 +351,7 @@ class KanziStructureDataset(Dataset):
         self.use_contacts = use_contacts
         self.max_contacts = max_contacts
         self.contact_prob = contact_prob
+        self.use_system_prompt = use_system_prompt
 
         # Load database with C-alpha coordinates
         self.paired_db = PairedFoldseekDB(db_path, include_ca=True)
@@ -358,6 +370,13 @@ class KanziStructureDataset(Dataset):
 
         # Open database handles
         self.paired_db.__enter__()
+
+        # Pre-compute Kanzi token IDs for efficient label masking
+        self._kanzi_token_ids = set()
+        for i in range(1000):
+            tid = self.tokenizer.convert_tokens_to_ids(f"{KANZI_TOKEN_PREFIX}{i}>")
+            if tid is not None and tid != self.tokenizer.unk_token_id:
+                self._kanzi_token_ids.add(tid)
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -382,8 +401,7 @@ class KanziStructureDataset(Dataset):
             contacts: Optional list of (i, j) contact pairs (1-indexed).
 
         Returns:
-            Formatted string like "<AA> M K T ... <SEP> <KANZI> <K599> <K358> ... </s>"
-            Or with contacts: "<AA> M K T ... <CONTACTS> 5-20 7-35 ... <SEP> <KANZI> ..."
+            Formatted string with optional system prompt, protein sequence, and structure.
         """
         aa_spaced = " ".join(aa_seq)
         # Convert Kanzi token indices to special tokens
@@ -391,11 +409,14 @@ class KanziStructureDataset(Dataset):
         eos = self.tokenizer.eos_token or ""
 
         if contacts:
-            # Format contacts as "i-j" pairs (uses standard number tokens)
+            # Use full prompt that explains contacts
+            prefix = SYSTEM_PROMPT if self.use_system_prompt else ""
             contacts_str = " ".join(f"{i}-{j}" for i, j in contacts)
-            return f"{AA_START} {aa_spaced} {CONTACTS_START} {contacts_str} {SEP_TOKEN} {KANZI_START} {kanzi_str} {eos}"
+            return f"{prefix}{AA_START} {aa_spaced} {CONTACTS_START} {contacts_str} {KANZI_START} {kanzi_str} {eos}"
         else:
-            return f"{AA_START} {aa_spaced} {SEP_TOKEN} {KANZI_START} {kanzi_str} {eos}"
+            # Use shorter prompt without contacts explanation
+            prefix = SYSTEM_PROMPT_NO_CONTACTS if self.use_system_prompt else ""
+            return f"{prefix}{AA_START} {aa_spaced} {KANZI_START} {kanzi_str} {eos}"
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         real_idx = self.indices[idx]
@@ -456,23 +477,20 @@ class KanziStructureDataset(Dataset):
         input_ids = encoded["input_ids"].squeeze(0)
         attention_mask = encoded["attention_mask"].squeeze(0)
 
-        # Create labels: mask loss on input sequence (before <SEP>)
+        # Create labels: mask loss on input sequence (before structure tokens)
         labels = input_ids.clone()
 
-        sep_token_id = self.tokenizer.convert_tokens_to_ids(SEP_TOKEN)
-        if sep_token_id is not None and sep_token_id != self.tokenizer.unk_token_id:
-            sep_positions = (input_ids == sep_token_id).nonzero(as_tuple=True)[0]
-            if len(sep_positions) > 0:
-                sep_pos = sep_positions[0].item()
-                labels[: sep_pos + 1] = -100
-        else:
-            # Fallback: find <KANZI> token
-            kanzi_start_id = self.tokenizer.convert_tokens_to_ids(KANZI_START)
-            if kanzi_start_id is not None and kanzi_start_id != self.tokenizer.unk_token_id:
-                kanzi_positions = (input_ids == kanzi_start_id).nonzero(as_tuple=True)[0]
-                if len(kanzi_positions) > 0:
-                    kanzi_pos = kanzi_positions[0].item()
-                    labels[:kanzi_pos] = -100
+        # Find the first Kanzi token (<K0> through <K999>) to determine where structure starts
+        # This is more robust than looking for "Structure:" which may be tokenized differently
+        first_kanzi_pos = None
+        for pos, token_id in enumerate(input_ids.tolist()):
+            if token_id in self._kanzi_token_ids:
+                first_kanzi_pos = pos
+                break
+
+        if first_kanzi_pos is not None:
+            # Mask everything before the first Kanzi token
+            labels[:first_kanzi_pos] = -100
 
         # Mask padding
         labels[attention_mask == 0] = -100
@@ -487,20 +505,21 @@ class KanziStructureDataset(Dataset):
 def add_kanzi_tokens(tokenizer) -> int:
     """Add Kanzi tokens to a tokenizer.
 
+    Note: Natural language delimiters (AA_START, KANZI_START, CONTACTS_START)
+    are NOT added as special tokens since they use standard vocabulary
+    to leverage pretrained embeddings.
+
     Args:
         tokenizer: Hugging Face tokenizer to modify.
 
     Returns:
         Number of tokens added.
     """
-    # Add special tokens
+    # Only add Kanzi structure tokens (these are truly new tokens)
     special_tokens = {
         "additional_special_tokens": [
-            AA_START,
-            KANZI_START,
-            SEP_TOKEN,
+            f"{KANZI_TOKEN_PREFIX}{i}>" for i in range(1000)  # <K0> to <K999>
         ]
-        + [f"{KANZI_TOKEN_PREFIX}{i}>" for i in range(1000)]  # <K0> to <K999>
     }
     num_added = tokenizer.add_special_tokens(special_tokens)
     return num_added
