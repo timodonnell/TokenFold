@@ -4,13 +4,16 @@ This file documents training runs for the structure prediction model.
 
 ---
 
-## Run 15: Kanzi + Contacts + LR Fix (2026-01-21) 🔄 IN PROGRESS
+## Run 16: Kanzi + Contacts + Fixed Resume (2026-01-21) 🔄 IN PROGRESS
 
 ### Wandb Link
-**https://wandb.ai/timodonnell/tokenfold/runs/30uqz63y**
+**https://wandb.ai/timodonnell/tokenfold/runs/diafb1mk**
 
 ### Status
-Resumed from checkpoint-56000 with fixed LR (2.5e-5), 500 warmup steps, flash attention enabled.
+Resumed from checkpoint-56000 with fixed LR (2.5e-5), 500 warmup steps, no flash attention.
+
+### Output Directory
+`outputs/kanzi_20260121_202532/`
 
 ### Command
 ```bash
@@ -26,7 +29,8 @@ uv run python -m tokenfold.train_kanzi \
   --max-protein-length 256 \
   --rmsd-eval-samples 50 \
   --rmsd-eval-interval 250 \
-  --output-dir outputs/kanzi_20260121_182646
+  --output-dir outputs/kanzi_20260121_202532 \
+  --no-flash-attn
 ```
 
 ### Configuration
@@ -36,7 +40,27 @@ uv run python -m tokenfold.train_kanzi \
 | Resume from | checkpoint-56000 |
 | Learning rate | 2.5e-5 |
 | Warmup steps | 500 |
-| Flash attention | Enabled |
+| Flash attention | Disabled |
+
+### Key Fix
+- Load only model weights (not optimizer/scheduler) when resuming to allow LR changes
+- Use `strict=False` for state_dict loading to handle tied weights (lm_head)
+
+---
+
+## Run 15: Kanzi + Contacts + LR Fix Attempts (2026-01-21) ❌ FAILED
+
+### Wandb Links
+- https://wandb.ai/timodonnell/tokenfold/runs/30uqz63y
+- https://wandb.ai/timodonnell/tokenfold/runs/k4q4xo55
+
+### Status
+Multiple failed attempts to resume with correct LR. Flash attention issues.
+
+### Notes
+- Run 30uqz63y: Flash attention enabled but caused issues
+- Run k4q4xo55: Another attempt
+- Fixed by disabling flash attention
 
 ---
 

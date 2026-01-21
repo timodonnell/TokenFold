@@ -17,6 +17,7 @@ dependencies = [
     "sentencepiece>=0.1.99",
     "protobuf>=3.20.0",
     "kanzi @ git+https://github.com/rdilip/kanzi.git",
+    "setuptools>=80.9.0",
 ]
 
 [project.optional-dependencies]
