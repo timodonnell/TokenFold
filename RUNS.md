@@ -4,6 +4,178 @@ This file documents training runs for the structure prediction model.
 
 ---
 
+## Run 15: Kanzi + Contacts + LR Fix (2026-01-21) 🔄 IN PROGRESS
+
+### Wandb Link
+**https://wandb.ai/timodonnell/tokenfold/runs/30uqz63y**
+
+### Status
+Resumed from checkpoint-56000 with fixed LR (2.5e-5), 500 warmup steps, flash attention enabled.
+
+### Command
+```bash
+HF_TOKEN=<token> WANDB_PROJECT=tokenfold \
+uv run python -m tokenfold.train_kanzi \
+  --model-name meta-llama/Llama-3.2-1B \
+  --resume-from outputs/kanzi_20260121_150343/checkpoint-56000 \
+  --use-contacts \
+  --learning-rate 2.5e-5 \
+  --warmup-steps 500 \
+  --batch-size 16 \
+  --gradient-accumulation-steps 1 \
+  --max-protein-length 256 \
+  --rmsd-eval-samples 50 \
+  --rmsd-eval-interval 250 \
+  --output-dir outputs/kanzi_20260121_182646
+```
+
+### Configuration
+| Parameter | Value |
+|-----------|-------|
+| Model | Llama-3.2-1B (pretrained) |
+| Resume from | checkpoint-56000 |
+| Learning rate | 2.5e-5 |
+| Warmup steps | 500 |
+| Flash attention | Enabled |
+
+---
+
+## Run 14: Kanzi + Contacts Resume Attempt (2026-01-21) ❌ FAILED
+
+### Status
+Multiple failed attempts to resume with higher LR. Issues with scheduler state being restored.
+
+### Notes
+- First attempt: LR stayed at ~7e-6 despite specifying 2.5e-4
+- Problem: `accelerator.load_state()` restores optimizer/scheduler state
+- Fixed by loading only model weights via safetensors directly
+
+---
+
+## Run 13: Kanzi + Contacts + Embedding Warmup (2026-01-21) 🔄 COMPLETED
+
+### Wandb Link
+**https://wandb.ai/timodonnell/tokenfold/runs/quc3m5d7**
+
+### Status
+Ran from step 49000 to 56000 before stopping to fix LR warmup.
+
+### Output Directory
+`outputs/kanzi_20260121_150343/`
+
+### Command
+```bash
+HF_TOKEN=<token> WANDB_PROJECT=tokenfold \
+uv run python -m tokenfold.train_kanzi \
+  --model-name meta-llama/Llama-3.2-1B \
+  --resume-from outputs/kanzi_20260120_222137/checkpoint-49000 \
+  --use-contacts \
+  --learning-rate 2.5e-5 \
+  --batch-size 16 \
+  --max-protein-length 256 \
+  --rmsd-eval-samples 50 \
+  --rmsd-eval-interval 250 \
+  --no-flash-attn
+```
+
+### Notes
+- LR warmup was taking forever (261k steps default)
+- Added `--warmup-steps` option to fix this
+
+---
+
+## Run 12: Kanzi + Contacts + Natural Language Format (2026-01-20) ✅ COMPLETED
+
+### Wandb Link
+**https://wandb.ai/timodonnell/tokenfold/runs/ybmd4h7t**
+
+### Status
+Completed 49000 steps. Model generating numbers instead of Kanzi tokens early on.
+
+### Output Directory
+`outputs/kanzi_20260120_222137/`
+
+### Command
+```bash
+HF_TOKEN=<token> WANDB_PROJECT=tokenfold \
+uv run python -m tokenfold.train_kanzi \
+  --model-name meta-llama/Llama-3.2-1B \
+  --freeze-base-steps 500 \
+  --use-contacts \
+  --learning-rate 5e-5 \
+  --batch-size 16 \
+  --gradient-accumulation-steps 1 \
+  --max-protein-length 256 \
+  --rmsd-eval-samples 50 \
+  --rmsd-eval-interval 250 \
+  --no-flash-attn
+```
+
+### Configuration
+| Parameter | Value |
+|-----------|-------|
+| Model | Llama-3.2-1B (pretrained) |
+| Format | Natural language (Protein sequence:, Structure:, Contacts:) |
+| System prompt | Document-style explanation |
+| Freeze base steps | 500 (embedding warmup) |
+| Use contacts | Yes |
+| Max protein length | 256 |
+| Batch size | 16 |
+| Learning rate | 5e-5 |
+
+### New Features Tested
+1. **Natural language format** - `Protein sequence: M K T ... Contacts: 5-20 ... Structure: <K100> ...`
+2. **Document-style system prompt** - Explains task to leverage pretrained knowledge
+3. **Embedding warmup** - Freeze base model for first 500 steps
+4. **Token diversity metrics** - Track unique tokens, entropy, most common token
+
+### Observations
+- Model initially generates `1 2 3 4 5...` instead of `<K100> <K200>...`
+- This is expected early in training - model defaults to familiar patterns
+- Token diversity metrics show collapse (`unique_tokens: 0-3`)
+
+---
+
+## Run 11: Kanzi Old Format (2026-01-19 to 2026-01-20) ✅ COMPLETED
+
+### Wandb Link
+**https://wandb.ai/timodonnell/tokenfold** (multiple runs)
+
+### Status
+Completed ~37000 steps with old special token format.
+
+### Output Directory
+`outputs/kanzi_predictor/`
+
+### Configuration
+| Parameter | Value |
+|-----------|-------|
+| Model | Llama-3.2-1B or TinyLlama |
+| Format | Special tokens (`<AA>`, `<SEP>`, `<KANZI>`, `<CONTACTS>`) |
+| Use contacts | Yes |
+| Contact dropout | `--contact-prob` option added |
+
+### Notes
+- Used old special token format before switching to natural language
+- Added contact-guided training (Phase 1)
+- Added example logging every 100 steps
+- Fixed wandb logging issues
+
+---
+
+## Run 10: Kanzi Initial Experiments (2026-01-18 to 2026-01-19)
+
+### Status
+Various experiments with Kanzi token prediction.
+
+### Key Developments
+1. Created `train_kanzi.py` for Kanzi structure prediction
+2. Added RMSD evaluation using Kabsch alignment
+3. Added C-alpha coordinate decoding via Kanzi tokenizer
+4. Implemented contact extraction from coordinates
+
+---
+
 ## Run 9: TinyLlama Full Fine-tune (2026-01-17) ✅ COMPLETED
 
 ### Wandb Link

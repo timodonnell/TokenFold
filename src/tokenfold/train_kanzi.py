@@ -534,6 +534,7 @@ def train(
     max_protein_length: int = 400,
     min_protein_length: int = 100,
     warmup_ratio: float = 0.03,
+    warmup_steps: int | None = None,
     use_flash_attn: bool = True,
     log_interval: int = 10,
     save_interval: int = 1000,
@@ -638,7 +639,7 @@ def train(
     num_training_steps = len(train_loader) * num_epochs // gradient_accumulation_steps
     if max_steps > 0:
         num_training_steps = min(num_training_steps, max_steps)
-    num_warmup_steps = int(num_training_steps * warmup_ratio)
+    num_warmup_steps = warmup_steps if warmup_steps is not None else int(num_training_steps * warmup_ratio)
 
     logger.info(f"Total training steps: {num_training_steps}")
     logger.info(f"Warmup steps: {num_warmup_steps}")
@@ -1051,6 +1052,7 @@ def main():
         "--min-protein-length", type=int, default=100, help="Min protein length"
     )
     parser.add_argument("--warmup-ratio", type=float, default=0.03, help="Warmup ratio")
+    parser.add_argument("--warmup-steps", type=int, default=None, help="Warmup steps (overrides warmup-ratio)")
     parser.add_argument("--no-flash-attn", action="store_true", help="Disable Flash Attention")
     parser.add_argument("--log-interval", type=int, default=10, help="Logging interval")
     parser.add_argument("--save-interval", type=int, default=1000, help="Save interval")
@@ -1112,6 +1114,7 @@ def main():
         max_protein_length=args.max_protein_length,
         min_protein_length=args.min_protein_length,
         warmup_ratio=args.warmup_ratio,
+        warmup_steps=args.warmup_steps,
         use_flash_attn=not args.no_flash_attn,
         log_interval=args.log_interval,
         save_interval=args.save_interval,
